@@ -49,15 +49,7 @@ pipeline {
             -v "%WORKSPACE%":/ws ^
             -w /ws ^
             node:22.20.0-alpine3.22 ^
-            sh -lc "
-              set -e
-              mkdir -p /ws/test-results
-              if [ -f package.json ]; then
-                npm ci
-                JEST_JUNIT_OUTPUT=/ws/test-results/junit-node.xml \
-                npx --yes jest --ci --reporters=default --reporters=jest-junit || true
-              fi
-            "
+            sh -lc "set -e; mkdir -p /ws/test-results; if [ -f package.json ]; then npm ci; JEST_JUNIT_OUTPUT=/ws/test-results/junit-node.xml npx --yes jest --ci --reporters=default --reporters=jest-junit || true; fi"
         '''
       }
     }
@@ -71,14 +63,7 @@ pipeline {
             -v "%WORKSPACE%":/ws ^
             -w /ws ^
             python:3.13.7-alpine3.22 ^
-            sh -lc "
-              set -e
-              python -m pip install --upgrade pip
-              if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-              if [ -f pyproject.toml ]; then python -m pip install . || true; fi
-              mkdir -p /ws/test-results
-              pytest -q --maxfail=1 --disable-warnings --junitxml=/ws/test-results/junit-py.xml || true
-            "
+            sh -lc "set -e; python -m pip install --upgrade pip; if [ -f requirements.txt ]; then pip install -r requirements.txt; fi; if [ -f pyproject.toml ]; then python -m pip install . || true; fi; mkdir -p /ws/test-results; pytest -q --maxfail=1 --disable-warnings --junitxml=/ws/test-results/junit-py.xml || true"
         '''
       }
     }
@@ -92,23 +77,7 @@ pipeline {
             -v "%WORKSPACE%":/ws ^
             -w /ws ^
             alpine:3.20 ^
-            sh -lc "
-              set -e
-              if [ -x ./deploy ]; then
-                ./deploy staging
-              elif [ -f ./deploy ]; then
-                sh ./deploy staging
-              else
-                echo 'No ./deploy script found; simulating staging deploy...'
-                echo 'STAGING DEPLOY OK' > /ws/deploy-staging.log
-              fi
-              # optional smoke tests
-              if [ -x ./run-smoke-tests ]; then
-                ./run-smoke-tests || exit 1
-              else
-                echo 'No smoke tests script; skipping.'
-              fi
-            "
+            sh -lc "set -e; if [ -x ./deploy ]; then ./deploy staging; elif [ -f ./deploy ]; then sh ./deploy staging; else echo 'No ./deploy script found; simulating staging deploy...'; echo 'STAGING DEPLOY OK' > /ws/deploy-staging.log; fi; if [ -x ./run-smoke-tests ]; then ./run-smoke-tests || exit 1; else echo 'No smoke tests script; skipping.'; fi"
         '''
       }
     }
@@ -116,11 +85,10 @@ pipeline {
     stage('Sanity check (manual gate)') {
       steps {
         script {
-          // Time-box the approval so builds don't hang forever
           timeout(time: 30, unit: 'MINUTES') {
             input message: "Promote to PRODUCTION?",
                   ok: "Deploy",
-                  submitterParameter: 'APPROVER' // recorded in build params
+                  submitterParameter: 'APPROVER'
           }
         }
       }
@@ -134,17 +102,7 @@ pipeline {
             -v "%WORKSPACE%":/ws ^
             -w /ws ^
             alpine:3.20 ^
-            sh -lc "
-              set -e
-              if [ -x ./deploy ]; then
-                ./deploy production
-              elif [ -f ./deploy ]; then
-                sh ./deploy production
-              else
-                echo 'No ./deploy script found; simulating prod deploy...'
-                echo 'PROD DEPLOY OK' > /ws/deploy-prod.log
-              fi
-            "
+            sh -lc "set -e; if [ -x ./deploy ]; then ./deploy production; elif [ -f ./deploy ]; then sh ./deploy production; else echo 'No ./deploy script found; simulating prod deploy...'; echo 'PROD DEPLOY OK' > /ws/deploy-prod.log; fi"
         '''
       }
     }
