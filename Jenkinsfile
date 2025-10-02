@@ -43,10 +43,8 @@ pipeline {
             sh -lc "
               set -e
               mkdir -p /ws/test-results
-              # Install jest-junit reporter if present in devDeps; fallback to npx install
               if [ -f package.json ]; then
                 npm ci
-                # Configure jest-junit output path via env var
                 JEST_JUNIT_OUTPUT=/ws/test-results/junit-node.xml \
                 npx --yes jest --ci --reporters=default --reporters=jest-junit || true
               fi
@@ -70,7 +68,6 @@ pipeline {
               if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
               if [ -f pyproject.toml ]; then python -m pip install . || true; fi
               mkdir -p /ws/test-results
-              # --maxfail=1 prevents huge logs; adjust as you like
               pytest -q --maxfail=1 --disable-warnings --junitxml=/ws/test-results/junit-py.xml || true
             "
         '''
@@ -93,8 +90,11 @@ pipeline {
 
   post {
     always {
-      // Archive typical build outputs (adjust globs to your project)
-      archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log', fingerprint: true, onlyIfSuccessful: false
+      // Archive typical build outputs (won’t fail if none are present)
+      archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log',
+                       fingerprint: true,
+                       onlyIfSuccessful: false,
+                       allowEmptyArchive: true
 
       // Publish all JUnit XMLs we may have produced
       junit allowEmptyResults: true, testResults: 'test-results/**/*.xml, build/test-results/**/*.xml, build/reports/**/*.xml'
