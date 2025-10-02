@@ -1,8 +1,7 @@
-/* Defining execution environments (host + per-stage Docker containers)
- * Requires: Docker Desktop running + Docker Pipeline plugin
+/* Defining execution environments on Windows with per-stage Docker containers
+ * Requires: Docker Desktop + Docker Pipeline plugin
  */
 pipeline {
-  // Default agent: run on your Windows controller/agent
   agent any
   options { timestamps() }
 
@@ -17,27 +16,26 @@ pipeline {
     }
 
     stage('Node in Docker') {
-      // This stage runs INSIDE a container
-      agent {
-        docker {
-          image 'node:22.20.0-alpine3.22'
-          // optional: args '-u root:root'  // e.g., if you need extra perms
-        }
-      }
       steps {
-        // Linux shell inside the container
-        sh 'node --eval "console.log(process.arch, process.platform)"'
-        sh '''
-          echo "Listing container filesystem:"
-          ls -lah
-        '''
+        script {
+          // Mount the Windows workspace into /ws and use a POSIX workdir
+          def args = "-v \"${env.WORKSPACE}\":/ws -w /ws"
+          docker.image('node:22.20.0-alpine3.22').inside(args) {
+            sh 'node --eval "console.log(process.arch, process.platform)"'
+            sh 'echo "Listing container filesystem:" && ls -lah'
+          }
+        }
       }
     }
 
     stage('Python in Docker') {
-      agent { docker { image 'python:3.13.7-alpine3.22' } }
       steps {
-        sh 'python --version'
+        script {
+          def args = "-v \"${env.WORKSPACE}\":/ws -w /ws"
+          docker.image('python:3.13.7-alpine3.22').inside(args) {
+            sh 'python --version'
+          }
+        }
       }
     }
 
