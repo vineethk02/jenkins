@@ -1,79 +1,105 @@
+/* Windows host + Linux containers:
+ * - Collect JUnit test reports
+ * - Archive build artifacts
+ * - Works whether you have Node, Python, or both
+ */
 pipeline {
   agent any
-  options { timestamps() }
-
-  parameters {
-    // Leave default empty; set in job config if/when you add DockerHub creds
-    string(name: 'DOCKERHUB_CREDS_ID', defaultValue: '', description: 'Credentials ID for DockerHub (username/password). Leave empty to skip.')
+  options {
+    timestamps()
+    // Stop later stages after UNSTABLE tests (optional; remove if you want to continue)
+    skipStagesAfterUnstable()
   }
 
   environment {
-    DISABLE_AUTH = 'true'
-    DB_ENGINE    = 'sqlite'
-    APP_ENV      = 'ci'
-    // Bind Secret Text credential to env var (requires a credential with this ID)
-    API_TOKEN    = credentials('my-api-token')
+    APP_ENV = 'ci'
   }
 
   stages {
-    stage('Show env on Host (Windows)') {
-      steps {
-        bat '''
-          echo === Host Environment (Windows) ===
-          echo DB_ENGINE=%DB_ENGINE%
-          echo DISABLE_AUTH=%DISABLE_AUTH%
-          echo APP_ENV=%APP_ENV%
-          rem NOTE: API_TOKEN is masked and should not be echoed.
-        '''
-      }
-    }
 
-    stage('Use env in Node container') {
+    stage('Build (Node)') {
+      when { expression { fileExists('package.json') } }
       steps {
         bat '''
+          echo === Node build in Docker ===
           docker run --rm ^
             -v "%WORKSPACE%":/ws ^
             -w /ws ^
-            -e DB_ENGINE="%DB_ENGINE%" ^
-            -e DISABLE_AUTH="%DISABLE_AUTH%" ^
-            -e APP_ENV="%APP_ENV%" ^
-            -e API_TOKEN="%API_TOKEN%" ^
             node:22.20.0-alpine3.22 ^
-            sh -lc "echo DB_ENGINE=$DB_ENGINE && echo DISABLE_AUTH=$DISABLE_AUTH && echo APP_ENV=$APP_ENV && test -n \\"$API_TOKEN\\" && echo TOKEN_PRESENT=1 || echo TOKEN_PRESENT=0"
+            sh -lc "npm ci && npm run build || true"
         '''
       }
     }
 
-    stage('Optional: DockerHub login + curl with token') {
-      when {
-        expression { return params.DOCKERHUB_CREDS_ID?.trim() }
-      }
+    stage('Test (Node/Jest)') {
+      when { expression { fileExists('package.json') } }
       steps {
-        script {
-          withCredentials([usernamePassword(credentialsId: params.DOCKERHUB_CREDS_ID, usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-            bat '''
-              docker run --rm ^
-                -v "%WORKSPACE%":/ws ^
-                -w /ws ^
-                -e API_TOKEN="%API_TOKEN%" ^
-                -e DH_USER="%DH_USER%" ^
-                -e DH_PASS="%DH_PASS%" ^
-                curlimages/curl:8.11.1 ^
-                sh -lc "echo Using masked creds; curl -sS -H \\"Authorization: Bearer $API_TOKEN\\" https://httpbin.org/bearer >/dev/null || true"
-            '''
-          }
-        }
+        bat '''
+          echo === Node tests (Jest) in Docker writing JUnit ===
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            node:22.20.0-alpine3.22 ^
+            sh -lc "
+              set -e
+              mkdir -p /ws/test-results
+              # Install jest-junit reporter if present in devDeps; fallback to npx install
+              if [ -f package.json ]; then
+                npm ci
+                # Configure jest-junit output path via env var
+                JEST_JUNIT_OUTPUT=/ws/test-results/junit-node.xml \
+                npx --yes jest --ci --reporters=default --reporters=jest-junit || true
+              fi
+            "
+        '''
+      }
+    }
+
+    stage('Test (Python/pytest)') {
+      when { expression { fileExists('requirements.txt') || fileExists('pyproject.toml') || fileExists('pytest.ini') || fileExists('tests') } }
+      steps {
+        bat '''
+          echo === Python tests (pytest) in Docker writing JUnit ===
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            python:3.13.7-alpine3.22 ^
+            sh -lc "
+              set -e
+              python -m pip install --upgrade pip
+              if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+              if [ -f pyproject.toml ]; then python -m pip install . || true; fi
+              mkdir -p /ws/test-results
+              # --maxfail=1 prevents huge logs; adjust as you like
+              pytest -q --maxfail=1 --disable-warnings --junitxml=/ws/test-results/junit-py.xml || true
+            "
+        '''
+      }
+    }
+
+    stage('(Optional) Package Artifacts') {
+      when { anyOf { expression { fileExists('build') }; expression { fileExists('dist') } } }
+      steps {
+        bat 'echo Packaging done (if any).'
       }
     }
 
     stage('Back on Host') {
       steps {
-        bat 'echo Back on host after container stages. & dir'
+        bat 'echo Back on host after container stages.'
       }
     }
   }
 
   post {
-    always { cleanWs() }
+    always {
+      // Archive typical build outputs (adjust globs to your project)
+      archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log', fingerprint: true, onlyIfSuccessful: false
+
+      // Publish all JUnit XMLs we may have produced
+      junit allowEmptyResults: true, testResults: 'test-results/**/*.xml, build/test-results/**/*.xml, build/reports/**/*.xml'
+
+      cleanWs()
+    }
   }
 }
