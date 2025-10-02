@@ -1,14 +1,22 @@
 /* Windows host + Linux containers:
- * - Collect JUnit test reports
- * - Archive build artifacts
- * - Works whether you have Node, Python, or both
+ * - JUnit + Artifacts
+ * - Cleanup + Notifications (email/slack optional)
  */
 pipeline {
   agent any
+
   options {
     timestamps()
-    // Stop later stages after UNSTABLE tests (optional; remove if you want to continue)
+    // Skip later stages when tests mark build UNSTABLE
     skipStagesAfterUnstable()
+  }
+
+  /************ NOTIFICATION CONTROLS ************/
+  parameters {
+    booleanParam(name: 'SEND_EMAIL', defaultValue: false, description: 'Send email on build events')
+    string(name: 'EMAIL_TO', defaultValue: 'team@example.com', description: 'Email recipients (comma-separated)')
+    booleanParam(name: 'SEND_SLACK', defaultValue: false, description: 'Send Slack message on build events')
+    string(name: 'SLACK_CHANNEL', defaultValue: '#ops-room', description: 'Slack channel (e.g., #ops-room)')
   }
 
   environment {
@@ -90,16 +98,84 @@ pipeline {
 
   post {
     always {
-      // Archive typical build outputs (won’t fail if none are present)
+      echo 'One way or another, I have finished.'
+
+      // Archive typical outputs (won’t fail if none exist)
       archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log',
                        fingerprint: true,
                        onlyIfSuccessful: false,
                        allowEmptyArchive: true
 
-      // Publish all JUnit XMLs we may have produced
-      junit allowEmptyResults: true, testResults: 'test-results/**/*.xml, build/test-results/**/*.xml, build/reports/**/*.xml'
+      // Publish all JUnit XMLs (safe if none exist)
+      junit allowEmptyResults: true,
+            testResults: 'test-results/**/*.xml, build/test-results/**/*.xml, build/reports/**/*.xml'
 
-      cleanWs()
+      // Clean workspace (cross-platform)
+      deleteDir()
+    }
+
+    success {
+      echo 'I succeeded!'
+      script {
+        if (params.SEND_EMAIL) {
+          try {
+            mail to: params.EMAIL_TO,
+                 subject: "SUCCESS: ${currentBuild.fullDisplayName}",
+                 body: "Build succeeded.\n${env.BUILD_URL}"
+          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
+        }
+        if (params.SEND_SLACK) {
+          try {
+            slackSend channel: params.SLACK_CHANNEL,
+                      color: 'good',
+                      message: "SUCCESS: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
+          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
+        }
+      }
+    }
+
+    unstable {
+      echo 'I am unstable :/'
+      script {
+        if (params.SEND_EMAIL) {
+          try {
+            mail to: params.EMAIL_TO,
+                 subject: "UNSTABLE: ${currentBuild.fullDisplayName}",
+                 body: "Some tests failed.\n${env.BUILD_URL}"
+          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
+        }
+        if (params.SEND_SLACK) {
+          try {
+            slackSend channel: params.SLACK_CHANNEL,
+                      color: 'warning',
+                      message: "UNSTABLE: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
+          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
+        }
+      }
+    }
+
+    failure {
+      echo 'I failed :('
+      script {
+        if (params.SEND_EMAIL) {
+          try {
+            mail to: params.EMAIL_TO,
+                 subject: "FAILED: ${currentBuild.fullDisplayName}",
+                 body: "Something went wrong.\n${env.BUILD_URL}"
+          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
+        }
+        if (params.SEND_SLACK) {
+          try {
+            slackSend channel: params.SLACK_CHANNEL,
+                      color: 'danger',
+                      message: "FAILED: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
+          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
+        }
+      }
+    }
+
+    changed {
+      echo 'Things were different before...'
     }
   }
 }
