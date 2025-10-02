@@ -1,5 +1,6 @@
-/* Defining execution environments on Windows with per-stage Docker containers
- * Requires: Docker Desktop + Docker Pipeline plugin
+/* Windows host + Linux containers: call Docker directly from bat to avoid
+ * docker-workflow adding a Windows -w path inside the container.
+ * Requires: Docker Desktop (Linux containers).
  */
 pipeline {
   agent any
@@ -10,32 +11,33 @@ pipeline {
       steps {
         bat '''
           ver
-          echo Host workspace: %CD%
+          echo Host workspace: %WORKSPACE%
         '''
       }
     }
 
     stage('Node in Docker') {
       steps {
-        script {
-          // Mount the Windows workspace into /ws and use a POSIX workdir
-          def args = "-v \"${env.WORKSPACE}\":/ws -w /ws"
-          docker.image('node:22.20.0-alpine3.22').inside(args) {
-            sh 'node --eval "console.log(process.arch, process.platform)"'
-            sh 'echo "Listing container filesystem:" && ls -lah'
-          }
-        }
+        // Run the Node container with a POSIX workdir and the workspace mounted at /ws
+        bat '''
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            node:22.20.0-alpine3.22 ^
+            sh -lc "node -v && node --eval \\"console.log(process.arch, process.platform)\\" && echo Listing /ws && ls -lah"
+        '''
       }
     }
 
     stage('Python in Docker') {
       steps {
-        script {
-          def args = "-v \"${env.WORKSPACE}\":/ws -w /ws"
-          docker.image('python:3.13.7-alpine3.22').inside(args) {
-            sh 'python --version'
-          }
-        }
+        bat '''
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            python:3.13.7-alpine3.22 ^
+            sh -lc "python --version && python -c \\"import sys,platform; print(sys.executable); print(platform.platform())\\""
+        '''
       }
     }
 
