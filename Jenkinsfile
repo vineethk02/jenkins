@@ -1,17 +1,18 @@
 /* Windows host + Linux containers:
+ * - Build/Test (Node & Python)
  * - JUnit + Artifacts
- * - Cleanup + Notifications (email/slack optional)
+ * - Cleanup + optional notifications
+ * - Deploy to Staging -> Manual Gate -> Deploy to Production
  */
 pipeline {
   agent any
 
   options {
     timestamps()
-    // Skip later stages when tests mark build UNSTABLE
-    skipStagesAfterUnstable()
+    skipStagesAfterUnstable() // don't deploy if tests marked UNSTABLE
   }
 
-  /************ NOTIFICATION CONTROLS ************/
+  /************ NOTIFICATION CONTROLS (optional) ************/
   parameters {
     booleanParam(name: 'SEND_EMAIL', defaultValue: false, description: 'Send email on build events')
     string(name: 'EMAIL_TO', defaultValue: 'team@example.com', description: 'Email recipients (comma-separated)')
@@ -24,7 +25,7 @@ pipeline {
   }
 
   stages {
-
+    /******************* BUILD & TEST *******************/
     stage('Build (Node)') {
       when { expression { fileExists('package.json') } }
       steps {
@@ -82,35 +83,94 @@ pipeline {
       }
     }
 
-    stage('(Optional) Package Artifacts') {
-      when { anyOf { expression { fileExists('build') }; expression { fileExists('dist') } } }
+    /******************* DEPLOY *******************/
+    stage('Deploy - Staging') {
       steps {
-        bat 'echo Packaging done (if any).'
+        bat '''
+          echo === Deploy to STAGING inside container ===
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            alpine:3.20 ^
+            sh -lc "
+              set -e
+              if [ -x ./deploy ]; then
+                ./deploy staging
+              elif [ -f ./deploy ]; then
+                sh ./deploy staging
+              else
+                echo 'No ./deploy script found; simulating staging deploy...'
+                echo 'STAGING DEPLOY OK' > /ws/deploy-staging.log
+              fi
+              # optional smoke tests
+              if [ -x ./run-smoke-tests ]; then
+                ./run-smoke-tests || exit 1
+              else
+                echo 'No smoke tests script; skipping.'
+              fi
+            "
+        '''
+      }
+    }
+
+    stage('Sanity check (manual gate)') {
+      steps {
+        script {
+          // Time-box the approval so builds don't hang forever
+          timeout(time: 30, unit: 'MINUTES') {
+            input message: "Promote to PRODUCTION?",
+                  ok: "Deploy",
+                  submitterParameter: 'APPROVER' // recorded in build params
+          }
+        }
+      }
+    }
+
+    stage('Deploy - Production') {
+      steps {
+        bat '''
+          echo === Deploy to PRODUCTION inside container ===
+          docker run --rm ^
+            -v "%WORKSPACE%":/ws ^
+            -w /ws ^
+            alpine:3.20 ^
+            sh -lc "
+              set -e
+              if [ -x ./deploy ]; then
+                ./deploy production
+              elif [ -f ./deploy ]; then
+                sh ./deploy production
+              else
+                echo 'No ./deploy script found; simulating prod deploy...'
+                echo 'PROD DEPLOY OK' > /ws/deploy-prod.log
+              fi
+            "
+        '''
       }
     }
 
     stage('Back on Host') {
       steps {
-        bat 'echo Back on host after container stages.'
+        bat 'echo Back on host after deploy stages.'
       }
     }
   }
 
+  /******************* POST *******************/
   post {
     always {
       echo 'One way or another, I have finished.'
 
-      // Archive typical outputs (won’t fail if none exist)
-      archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log',
+      // Archive useful outputs (won’t fail if none exist)
+      archiveArtifacts artifacts: 'build/**/*, dist/**/*, logs/**/*, **/*.log, deploy-*.log',
                        fingerprint: true,
                        onlyIfSuccessful: false,
                        allowEmptyArchive: true
 
-      // Publish all JUnit XMLs (safe if none exist)
+      // Publish JUnit XMLs (safe if none exist)
       junit allowEmptyResults: true,
             testResults: 'test-results/**/*.xml, build/test-results/**/*.xml, build/reports/**/*.xml'
 
-      // Clean workspace (cross-platform)
       deleteDir()
     }
 
@@ -121,37 +181,21 @@ pipeline {
           try {
             mail to: params.EMAIL_TO,
                  subject: "SUCCESS: ${currentBuild.fullDisplayName}",
-                 body: "Build succeeded.\n${env.BUILD_URL}"
-          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
+                 body: "Build & Deploy succeeded.\n${env.BUILD_URL}"
+          } catch (ignored) { echo 'Email step skipped (mail not configured?)' }
         }
         if (params.SEND_SLACK) {
           try {
             slackSend channel: params.SLACK_CHANNEL,
                       color: 'good',
                       message: "SUCCESS: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
-          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
+          } catch (ignored) { echo 'Slack step skipped (slack not configured?)' }
         }
       }
     }
 
     unstable {
       echo 'I am unstable :/'
-      script {
-        if (params.SEND_EMAIL) {
-          try {
-            mail to: params.EMAIL_TO,
-                 subject: "UNSTABLE: ${currentBuild.fullDisplayName}",
-                 body: "Some tests failed.\n${env.BUILD_URL}"
-          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
-        }
-        if (params.SEND_SLACK) {
-          try {
-            slackSend channel: params.SLACK_CHANNEL,
-                      color: 'warning',
-                      message: "UNSTABLE: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
-          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
-        }
-      }
     }
 
     failure {
@@ -161,15 +205,15 @@ pipeline {
           try {
             mail to: params.EMAIL_TO,
                  subject: "FAILED: ${currentBuild.fullDisplayName}",
-                 body: "Something went wrong.\n${env.BUILD_URL}"
-          } catch (ignored) { echo 'Email step skipped (mail plugin not configured?)' }
+                 body: "Build or Deploy failed.\n${env.BUILD_URL}"
+          } catch (ignored) { echo 'Email step skipped (mail not configured?)' }
         }
         if (params.SEND_SLACK) {
           try {
             slackSend channel: params.SLACK_CHANNEL,
                       color: 'danger',
                       message: "FAILED: ${currentBuild.fullDisplayName} — ${env.BUILD_URL}"
-          } catch (ignored) { echo 'Slack step skipped (slack plugin not configured?)' }
+          } catch (ignored) { echo 'Slack step skipped (slack not configured?)' }
         }
       }
     }
